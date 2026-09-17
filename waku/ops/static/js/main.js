@@ -18,7 +18,11 @@ const TITLES = {chat:"Chat & watch", ops:"LLM Ops",
                 "compare/models":"Model race — ten brains, one harness",
                 "compare/memory":"Memory race — one brain, five places to put facts",
                 settings:"Behaviour — how a turn runs",
-                database:"Database — everything Waku stores (state.db)"};
+                database:"Database — everything Waku stores (state.db)",
+                project:"Project harness — the map, the team, the watches",
+                "project/map":"Project map",
+                "project/roles":"Project roles",
+                "project/watches":"Project watches"};
 function render(){
   if (!D) return;
   const [v, subRaw] = (location.hash||"#overview").slice(1).split("/");
@@ -58,6 +62,21 @@ function render(){
   document.getElementById("n-tools").textContent = (D.calendar.length + D.outbox.length) || "";
   document.getElementById("n-db").textContent = (D.db && D.db.all_tables.length) || "";
   document.getElementById("n-ops").textContent = D.stats.tool_errors || (D.eval_report ? "" : "!");
+  const grpProject = document.getElementById("grp-project");
+  const navProject = document.getElementById("nav-project");
+  if (D.harness && !D.harness.error){
+    grpProject.textContent = D.harness.title;
+    navProject.querySelector(".lbl").textContent = D.harness.title;
+    grpProject.hidden = false; navProject.hidden = false;
+    document.getElementById("n-project").textContent = (D.harness.waiting||[]).length || "";
+  } else if (D.harness && D.harness.error){
+    grpProject.textContent = "Project";
+    navProject.querySelector(".lbl").textContent = "Project";
+    grpProject.hidden = false; navProject.hidden = false;
+    document.getElementById("n-project").textContent = "!";
+  } else {
+    grpProject.hidden = true; navProject.hidden = true;
+  }
 }
 let lastFetch = Date.now();
 let lastCompareLoad = 0;   // throttle the Compare scoreboard self-heal to ~5s

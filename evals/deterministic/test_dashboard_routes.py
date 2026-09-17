@@ -121,6 +121,7 @@ def test_collect_returns_the_keys_the_page_reads():
     expected = {
         "settings", "tools", "facts", "episodes", "soul", "chat_log", "sessions",
         "turns", "stats", "db", "skills", "trace_file", "chat_pending", "graph",
+        "harness",
     }
     src = inspect.getsource(dashboard.collect)
     for key in expected:
@@ -135,3 +136,46 @@ def test_the_removed_arena_duplicate_stays_removed():
     src = _source()
     assert "def _compare_one" not in src
     assert "def compare_models" not in src
+
+
+def _harness_toml(name='name = "qamata"\ntitle = "Qamata"\n'):
+    return name + '''
+[[roles]]
+id = "architect"
+name = "Software Architect"
+lens = "SOFTWARE ARCHITECT"
+runtime = "claude"
+model = "fable-5.1"
+authority = "recommend"
+skills = []
+'''
+
+
+def test_collect_harness_null_when_unbound(monkeypatch, tmp_path):
+    monkeypatch.setenv("WAKU_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("WAKU_HARNESS", raising=False)
+    assert dashboard.collect()["harness"] is None
+
+
+def test_collect_harness_carries_title_and_roles_when_bound(monkeypatch, tmp_path):
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    (harness / "project.toml").write_text(_harness_toml(), encoding="utf-8")
+    monkeypatch.setenv("WAKU_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("WAKU_HARNESS", str(harness))
+    payload = dashboard.collect()
+    assert payload["harness"]["title"] == "Qamata"
+    assert payload["harness"]["roles"][0]["id"] == "architect"
+
+
+def test_collect_harness_error_when_malformed_and_rest_still_arrives(monkeypatch, tmp_path):
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    (harness / "project.toml").write_text("not valid = toml [", encoding="utf-8")
+    monkeypatch.setenv("WAKU_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("WAKU_HARNESS", str(harness))
+    payload = dashboard.collect()
+    assert "error" in payload["harness"]
+    assert payload["harness"]["path"] == str(harness)
+    # the malformed harness must not blank the rest of the page
+    assert "stats" in payload and "tools" in payload

@@ -388,6 +388,91 @@ function connectionModalKeydown(event){
   if (event.key === "Escape") closeConnectionModal();
 }
 
+// --- Project tab: the bound harness, read-only ---------------------------------
+const MAP_AUTH_RANK = {"source-of-truth":0, "decided":1, "working-model":2,
+                       "proposal":3, "history":4};
+const MAP_AUTH_V = {"source-of-truth":"ok", "decided":"ok", "working-model":"neutral",
+                    "proposal":"warn", "history":"miss"};
+const MAP_STATUS_V = {"established":"ok", "open":"warn", "deferred":"neutral",
+                      "hypothesis":"neutral", "stale":"bad"};
+const ROLE_AUTH_V = {"observe":"neutral", "recommend":"neutral", "plan":"neutral",
+                     "sandbox":"warn", "reversible":"bad", "irreversible":"bad"};
+
+function projectMap(h){
+  const entries = h.map || [];
+  let out = uiStatBand([
+    {label:"entries", value: entries.length},
+    {label:"open", value: (h.open||[]).length},
+    {label:"awaiting owner", value: (h.waiting||[]).length},
+    {label:"drifted", value: (h.drifted||[]).length}
+  ]);
+  if ((h.next||[]).length){
+    out += uiCard((h.next||[]).map(n =>
+      uiRow(uiBadge(esc(n.action), "neutral"), `<code>${esc(n.id)}</code>`, esc(n.note||""))
+    ).join(""), {title: "Three most consequential next things"});
+  }
+  const sorted = entries.slice().sort((a,b) =>
+    ((MAP_AUTH_RANK[a.authority] ?? 9) - (MAP_AUTH_RANK[b.authority] ?? 9)) ||
+    String(a.id).localeCompare(String(b.id)));
+  out += uiTable(
+    ["id","kind","authority","status","path","owner","verified","note"],
+    sorted.map(e => [
+      `<code>${esc(e.id)}</code>`,
+      esc(e.kind||""),
+      uiBadge(esc(e.authority||""), MAP_AUTH_V[e.authority] || "neutral"),
+      uiBadge(esc(e.status||""), MAP_STATUS_V[e.status] || "neutral") + (e.drifted ? " " + uiBadge("drifted","warn") : ""),
+      (e.path === "none" || !e.path) ? `<span class="meta">none</span>` : esc(e.path),
+      esc(e.owner||""),
+      esc(e.verified||""),
+      esc(e.note||"")
+    ]),
+    {empty: "No entries recorded."}
+  );
+  return out;
+}
+
+function projectRoles(h){
+  const roles = h.roles || [];
+  if (!roles.length) return uiCard(`<span class="empty">No roles recorded.</span>`);
+  return roles.map(r => {
+    const badges = [
+      uiBadge(esc(r.runtime||""), "neutral"),
+      r.model ? uiBadge(esc(r.model), "value") : "",
+      r.effort ? uiBadge(esc(r.effort), "value") : "",
+      uiBadge(esc(r.authority||""), ROLE_AUTH_V[r.authority] || "neutral")
+    ].filter(Boolean).join(" ");
+    const sandboxText = r.sandbox === "read-only" ? "runs read-only"
+      : r.sandbox === "workspace-write" ? "runs workspace-write"
+      : "owner approval required";
+    const skills = (r.skills && r.skills.length)
+      ? r.skills.map(s => `<code>${esc(s.id)}</code>${s.exists ? "" : " " + uiBadge("missing","bad")}`).join(" ")
+      : `<span class="meta">none</span>`;
+    return uiCard(`
+      <div class="meta" style="margin-bottom:var(--space-2)">${esc(r.lens||"")}</div>
+      <div>${esc(r.responsibility||"")}</div>
+      <div style="margin-top:var(--space-2)">${badges}</div>
+      <div class="meta" style="margin-top:var(--space-2)">${sandboxText}</div>
+      <div style="margin-top:var(--space-2)">${skills}</div>`,
+      {title: esc(r.name || r.id), size: "sm"});
+  }).join("");
+}
+
+function projectWatches(h){
+  const watches = h.watches || [];
+  return uiTable(
+    ["id","claim","metric","op","threshold","downstream"],
+    watches.map(w => [
+      `<code>${esc(w.id||"")}</code>`,
+      esc(w.claim||""),
+      esc(w.metric||""),
+      esc(w.op||""),
+      esc(String(w.threshold ?? "")),
+      esc((w.depended_on_by||[]).join(", "))
+    ]),
+    {empty: "No watches recorded."}
+  );
+}
+
 const VIEWS = {
   models(d){
     // Provider card grid (logo / status dot / edit / enable-disable). Editing
@@ -691,5 +776,20 @@ const VIEWS = {
         `<tr><td>${esc(w.heard)}</td><td class="meta">${esc((w.ts||"").replace("T"," ").slice(0,19))}</td></tr>`));
     }
     return h;
+  },
+  project(d, sub){
+    const h = d.harness;
+    sub = sub || "map";
+    if (!h) return uiNotice("note",
+      `No project harness is bound. Set <code>WAKU_HARNESS</code> to the path of a directory holding <code>project.toml</code>, then restart the dashboard.`);
+    if (h.error) return uiNotice("failed",
+      `Could not read the harness at <code>${esc(h.path)}</code>: ${esc(h.error)}`);
+    const tabs = [["map","Map",(h.map||[]).length],
+                  ["roles","Roles",(h.roles||[]).length],
+                  ["watches","Watches",(h.watches||[]).length || null]];
+    let out = subtabBar("project", tabs, sub);
+    if (sub === "roles") return out + projectRoles(h);
+    if (sub === "watches") return out + projectWatches(h);
+    return out + projectMap(h);
   },
 };

@@ -5,29 +5,25 @@ questions a returning founder asks: what was I trying to accomplish, where did I
 leave it, what changed while I was away, which decisions are unresolved, and what
 are the three most consequential next things.
 
+The computation lives in `state()` — one source for two renderers: the CLI text
+(`bring_me_back`) and the dashboard's Project tab (via `/api/data`). They can
+never disagree because they both read the same dict.
+
 Deterministic and stdlib-only: it stats the files the map points at, compares
 their mtime against each entry's `verified` date, and ranks by status. No model,
-no network, no key — so it can run the moment you sit down, before any brain is
-configured. See docs/project-harness.md.
+no network, no key. See docs/project-harness.md.
 """
 
 from __future__ import annotations
 
 import sys
-import tomllib
 from datetime import date, datetime, time
 from pathlib import Path
 
+from waku.runtime.knowledge import load_map
+from waku.tools.authority import authority_to_sandbox
+
 CONFIG = "project.toml"
-
-
-def _load(project: Path) -> dict:
-    path = project / CONFIG
-    if not path.is_file():
-        raise SystemExit(
-            f"no {CONFIG} in {project} — run `waku new-project <name>`, or point "
-            "at a project harness.")
-    return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
 def _changed_since_verified(entry: dict, project: Path) -> bool:
@@ -54,16 +50,99 @@ def _changed_since_verified(entry: dict, project: Path) -> bool:
     return f.stat().st_mtime > datetime.combine(d, time.min).timestamp()
 
 
-def bring_me_back(project: Path) -> str:
-    cfg = _load(project)
-    entries = cfg.get("map", [])
-    title = cfg.get("title") or cfg.get("name") or "project"
-    thesis = (cfg.get("thesis") or "").strip()
+def _exists(entry: dict, project: Path) -> bool | None:
+    """Whether the file an entry points at exists. None for a recorded claim
+    (`none`) or a directory — existence is not a meaningful question there."""
+    p = (entry.get("path") or "").strip()
+    if not p or p == "none":
+        return None
+    p = p.split("#", 1)[0].strip()
+    if not p:
+        return None
+    f = project / p
+    if f.is_dir():
+        return None
+    return f.is_file()
 
-    open_ = [e for e in entries if e.get("status") == "open"]
-    drifted = [e for e in entries if _changed_since_verified(e, project)]
-    waiting = [e for e in entries
-               if e.get("authority") == "proposal" and e.get("status") in ("open", "deferred")]
+
+def state(project: Path) -> dict:
+    """The harness computation as data. Keys match the frontend contract exactly.
+
+    Raises SystemExit (same message as before) when there is no project.toml."""
+    project = Path(project)
+    if not (project / CONFIG).is_file():
+        raise SystemExit(
+            f"no {CONFIG} in {project} — run `waku new-project <name>`, or point "
+            "at a project harness.")
+
+    cfg, entries = load_map(project)
+
+    # Each map entry carries its drift status and whether its file exists.
+    map_entries = [{**e, "drifted": _changed_since_verified(e, project),
+                    "exists": _exists(e, project)} for e in entries]
+
+    open_entries = [e for e in map_entries if e.get("status") == "open"]
+    drifted_entries = [e for e in map_entries if e.get("drifted")]
+    waiting_entries = [e for e in map_entries
+                       if e.get("authority") == "proposal"
+                       and e.get("status") in ("open", "deferred")]
+
+    # Three most consequential, same ranking as the text renderer.
+    next_items: list[dict] = []
+    seen: set[str] = set()
+    for action, group in (("resolve", open_entries),
+                          ("re-verify", drifted_entries),
+                          ("authorize", waiting_entries)):
+        for e in group:
+            if e.get("id") in seen:
+                continue
+            seen.add(e.get("id"))
+            next_items.append({"action": action, "id": e.get("id", ""),
+                               "note": e.get("note", "")})
+            if len(next_items) == 3:
+                break
+        if len(next_items) == 3:
+            break
+
+    roles = []
+    for r in cfg.get("roles", []):
+        role = {**r}
+        role["skills"] = [
+            {"id": sid, "exists": (project / "skills" / r.get("id", "") / sid / "SKILL.md").is_file()}
+            for sid in r.get("skills", [])
+        ]
+        role["sandbox"] = authority_to_sandbox(r.get("authority", "recommend"))
+        roles.append(role)
+
+    auth = cfg.get("authority") or {}
+    return {
+        "title": cfg.get("title") or cfg.get("name") or "project",
+        "thesis": cfg.get("thesis") or "",
+        "name": cfg.get("name") or "",
+        "updated": cfg.get("updated") or "",
+        "authority": {"default": auth.get("default", "recommend"),
+                      "irreversible": auth.get("irreversible", [])},
+        "map": map_entries,
+        "open": [e.get("id") for e in open_entries],
+        "waiting": [e.get("id") for e in waiting_entries],
+        "drifted": [e.get("id") for e in drifted_entries],
+        "next": next_items,
+        "roles": roles,
+        "watches": cfg.get("watches", []),
+    }
+
+
+def bring_me_back(project: Path) -> str:
+    """The CLI text, built from state() — byte-identical to what it always was."""
+    s = state(project)
+    entries = s["map"]
+    by_id = {e["id"]: e for e in entries}
+    title = s["title"]
+    thesis = s["thesis"].strip()
+
+    open_ = [by_id[i] for i in s["open"]]
+    drifted = [by_id[i] for i in s["drifted"]]
+    waiting = [by_id[i] for i in s["waiting"]]
 
     out = [f"# {title} — bring me back", ""]
     if thesis:
@@ -102,22 +181,10 @@ def bring_me_back(project: Path) -> str:
     out.append("")
 
     out.append("## Three most consequential next things")
-    ranked = [("resolve", e) for e in open_] + \
-             [("re-verify", e) for e in drifted] + \
-             [("authorize", e) for e in waiting]
-    seen_ids: set[str] = set()
-    top: list[tuple[str, dict]] = []
-    for action, e in ranked:
-        if e.get("id") in seen_ids:
-            continue
-        seen_ids.add(e.get("id"))
-        top.append((action, e))
-        if len(top) == 3:
-            break
-    if top:
-        for i, (action, e) in enumerate(top, 1):
-            note = f" — {e.get('note')}" if e.get("note") else ""
-            out.append(f"{i}. {action} `{e.get('id')}`{note}")
+    if s["next"]:
+        for i, item in enumerate(s["next"], 1):
+            note = f" — {item.get('note')}" if item.get("note") else ""
+            out.append(f"{i}. {item['action']} `{item['id']}`{note}")
     else:
         out.append("- nothing outstanding — the project is quiet")
     return "\n".join(out)
