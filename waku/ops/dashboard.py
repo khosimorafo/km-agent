@@ -450,6 +450,18 @@ def collect() -> dict:
                    "path": e.get("path") or [], "error": e.get("error")}
                   for e in events if e.get("type") == "graph_end"][-8:][::-1]
 
+    # The bound project harness, if any. None when unbound; a dict otherwise.
+    # A malformed project.toml must not blank the dashboard — surface it instead.
+    harness_payload = None
+    if settings.harness and (Path(settings.harness) / "project.toml").is_file():
+        from waku.ops.bring_me_back import state as harness_state
+
+        try:
+            harness_payload = harness_state(Path(settings.harness))
+        except Exception as exc:  # noqa: BLE001 — degrade, never take the page down
+            harness_payload = {"error": f"{type(exc).__name__}: {exc}",
+                               "path": settings.harness}
+
     return {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "home": str(home.resolve()),
@@ -508,6 +520,7 @@ def collect() -> dict:
         "connections": [asdict(view) for view in list_connections()],
         "tools": tools_info(),
         "usage": usage_summary(home),
+        "harness": harness_payload,
     }
 
 
