@@ -17,6 +17,12 @@ from waku.app import Waku
 
 console = Console()
 
+# Commands carry a slash, always: `/memory` does, so leaving does too. A bare
+# `exit` or `quit` stays an ordinary message to the model, because the prompt
+# box is for talking and there is no word a user might genuinely want to say
+# that the gateway is allowed to swallow. Compared lowercased.
+QUIT_WORDS = {"/quit", "/exit", "/q"}
+
 
 def _memory_snapshot(conn: sqlite3.Connection) -> str:
     """Render a bounded, read-only view of Waku's local memory."""
@@ -58,7 +64,7 @@ def main() -> None:
     console.print(Panel.fit(
         "[bold]Waku[/bold] — local, yours, transparent.\n"
         f"home: {waku.settings.home.resolve()}   model: {waku.settings.model}\n"
-        "Commands: /memory · /quit",
+        "Commands: /memory · /quit (or /q)",
         border_style="cyan",
     ))
     while True:
@@ -68,7 +74,7 @@ def main() -> None:
             break
         if not user_message:
             continue
-        if user_message in ("/quit", "/exit"):
+        if user_message.lower() in QUIT_WORDS:
             break
         if user_message == "/memory":
             console.print(

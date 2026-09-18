@@ -15,6 +15,22 @@ from waku.runtime.session import Session
 from waku.tools import build_registry
 
 
+def provider_error_reply(settings: Settings, exc: Exception) -> str:
+    """The honest sentence a gateway prints when the model itself is unreachable.
+
+    Names the brain that failed and what it said, because the two questions a
+    user has are "which of my providers is this?" and "is it me or them?" —
+    a 402 and a dropped connection need different actions. The raw provider
+    text is kept (truncated): parsing each vendor's error shape would be one
+    more thing to keep current, and the useful part is legible as it is."""
+    detail = str(exc).strip() or repr(exc)
+    if len(detail) > 300:
+        detail = detail[:300] + "…"
+    brain = f"{settings.provider}/{settings.model}" if settings.model else settings.provider
+    return (f"I couldn't reach the model, so this turn did not happen and nothing "
+            f"was saved. {brain} raised {type(exc).__name__}: {detail}")
+
+
 class Waku:
     def __init__(self, settings: Settings | None = None, client=None, conn=None):
         # `client` and `conn` are injectable: evals swap in a scripted model,
@@ -85,8 +101,24 @@ class Waku:
                     notify("graph_end", {"workflow": "triage", "ms": 0, "steps": 0,
                                          "path": [], "error": repr(exc)})
                     result = None
+            # The model itself failing is the ONE error the loop cannot answer:
+            # there is no reply to return and no tool output to surface. Before
+            # this, it travelled up as a traceback and killed the gateway — a
+            # spent API balance ended the session and lost the conversation.
+            # Caught here, one layer above the loop, because every gateway
+            # (cli / dashboard / voice / telegram) calls respond(), so all of
+            # them degrade honestly from one guard. Same fail-open rule as the
+            # retrieval gate; the loop stays the ~95 lines it teaches.
+            failure: Exception | None = None
             if result is None:
-                result = self._run_full_turn(user_message, notify, stream)
+                try:
+                    result = self._run_full_turn(user_message, notify, stream)
+                except Exception as exc:  # noqa: BLE001 — degrade, never crash out
+                    failure = exc
+                    result = LoopResult(reply=provider_error_reply(self.settings, exc))
+                    notify("turn_error", {"error": repr(exc),
+                                          "provider": self.settings.provider,
+                                          "model": self.settings.model or ""})
 
             quick = captured.get("graph_route", {}).get("target") == "quick_reply"
 
@@ -111,11 +143,17 @@ class Waku:
                 "model": self.settings.small_model if quick else self.settings.model,
                 "provider": self.settings.provider,
             }
-            self.session.add_exchange(user_message, result.reply, tool_calls=result.tool_calls,
-                                      source=source, meta=meta)
-            if self.memory is not None:
-                self.memory.maybe_consolidate(notify=notify)
-                self.memory.export_markdown()   # keep MEMORY.md in sync
+            # A failed turn is not an exchange: recording it would put the error
+            # text into working memory as an assistant reply, feed it to the
+            # next turn, and hand it to consolidation as a fact. The trace keeps
+            # the failure; memory stays clean.
+            if failure is None:
+                self.session.add_exchange(user_message, result.reply,
+                                          tool_calls=result.tool_calls,
+                                          source=source, meta=meta)
+                if self.memory is not None:
+                    self.memory.maybe_consolidate(notify=notify)
+                    self.memory.export_markdown()   # keep MEMORY.md in sync
 
         self.tracer.end_turn(result.reply, result.iterations)
         return result
